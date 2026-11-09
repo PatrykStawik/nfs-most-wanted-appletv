@@ -582,10 +582,21 @@ void first_run_settings(Cpu *c, const char *where) {     // also from widescreen
                                                                                                                    
     // display's native resolution. A saved setting never gets here (the game's loader reads it instead).
     int native = widescreen_native_slot();
+#if defined(TARGET_OS_TV) && TARGET_OS_TV
+    // Apple TV 4K (A15, 1080p): 4x MSAA costs about 6 ms of GPU a race frame (20 ms: 50 fps); without it a race holds
+    // 60 fps (14 ms). F10 > Picture > Anti-aliasing still offers it.
+    if (!boot_reg_override("g_FSAALevel")) M32(FSAA_LEVEL) = 0;
+#else
     if (!boot_reg_override("g_FSAALevel")) M32(FSAA_LEVEL) = 2;
+#endif
     if (!boot_reg_override("g_ShadowDetail")) M32(SHADOW_DETAIL) = 2;
     if (native >= 0 && !boot_reg_override("g_RacingResolution")) M32(RES_INDEX) = (uint32_t)native;
-    fprintf(stderr, "boot: first run, %s: detection picked g_FSAALevel %u g_RacingResolution %u, using %u %u, g_ShadowDetail %u (defaults: 4x MSAA, shadows 2, native resolution; BOOT_REG wins)\n", where, aa, res,
+#if defined(TARGET_OS_TV) && TARGET_OS_TV
+#define FIRST_RUN_AA "no MSAA (Apple TV)"
+#else
+#define FIRST_RUN_AA "4x MSAA"
+#endif
+    fprintf(stderr, "boot: first run, %s: detection picked g_FSAALevel %u g_RacingResolution %u, using %u %u, g_ShadowDetail %u (defaults: " FIRST_RUN_AA ", shadows 2, native resolution; BOOT_REG wins)\n", where, aa, res,
             M32(FSAA_LEVEL), M32(RES_INDEX), M32(SHADOW_DETAIL));
 }
 void f_006C1990_orig(Cpu *c);

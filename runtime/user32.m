@@ -10,7 +10,17 @@
 // back buffer scaled to fit; the green button, Window > Zoom and View > Enter Full Screen (Ctrl-Cmd-F) switch. The
 // first mode is the game's own choice (a captionless window is its full-screen mode) from a terminal, the player's
 // last choice in NFSMW.app (USERDATA/app.txt, full screen the first time); NFS_FULLSCREEN=0|1 overrides both.
+//
+// Apple TV (TARGET_OS_TV): there is no window to make. The host (tvos/host/tv_app.m) owns the scene's view and its
+// CAMetalLayer; the game window is attached to it and is always full screen. UIKit runs on the main thread, so the game
+// thread doesn't pump events: the host posts focus changes (user32_tv_focus) and keyboard keys (user32_tv_key).
+#include <TargetConditionals.h>
+#if TARGET_OS_TV
+#import <UIKit/UIKit.h>
+#include "tv_host.h"
+#else
 #import <Cocoa/Cocoa.h>
+#endif
 #import <QuartzCore/CAMetalLayer.h>
 #import <objc/runtime.h>
 #import <GameController/GameController.h>
@@ -23,7 +33,14 @@
 
 int app_native_fullscreen(void);
 int app_fullscreen_is_auto(void);
+#if TARGET_OS_TV
+#define APP_ACTIVE() tv_host_active()
+#define ON_GAME_MAIN_THREAD() tv_host_is_game_thread()
+#else
 int app_request_fullscreen_space(NSWindow *window, int full);
+#define APP_ACTIVE() NSApp.isActive
+#define ON_GAME_MAIN_THREAD() pthread_main_np()
+#endif
 void render_presentation_changed(void);
 void report_note(const char *fmt, ...);
 
@@ -46,8 +63,13 @@ typedef struct {
     int native_transition, mode_logged;
     int mode_pending;     // latest NFS_FULLSCREEN_MODE is applied after Cocoa finishes changing Space
     int reenter;          // Native Space left for a Borderless change: fill the screen again once it is out
+#if TARGET_OS_TV
+    UIWindow *ns;         // the host's window and view (tv_app.m), attached, never created here
+    UIView *view;
+#else
     NSWindow *ns;
     NSView *view;
+#endif
 } Win;
 static WinClass classes[MAX_CLASSES];
 static int class_count;
@@ -108,6 +130,26 @@ static void ns_reconcile_mode(Win *w);
 static int cursor_hidden;               // ShowCursor count < 0: no system cursor over the game (it draws its own)
 
 // ---------------- Cocoa ----------------
+#if TARGET_OS_TV
+static int test_px_w, test_px_h;   // NFS_TEST_DISPLAY_CHANGE: the pretend display, in pixels
+static CFAbsoluteTime screen_changed_at;
+static int screen_dirty;
+static void read_main_screen(void) {
+    int hz;
+    tv_host_screen(&screen_w, &screen_h, &screen_scale, &hz);
+    screen_top_inset = 0;
+}
+static void cocoa_init(void) {
+    if (headless < 0) headless = getenv("BOOT_HEADLESS") != NULL;
+    static int done;
+    if (done || headless) return;
+    done = 1;
+    read_main_screen();
+    // UIKit's run loop discovers controllers on the main thread: give a pad that is already on a moment to show up, so
+    // it names the game's gamepad from the start (one that connects later is picked up by pad_read).
+    for (int i = 0; i < 25 && !GCController.controllers.count; ++i) usleep(20000);
+}
+#else
 @interface GameWindow : NSWindow       // borderless mode must still be able to become the key window
 @end
 @implementation GameWindow
@@ -252,6 +294,7 @@ static void cocoa_init(void) {
             [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
     }
 }
+#endif
 
 // macOS virtual key code -> Windows VK and set-1 scan code.
 typedef struct { uint8_t vk, scan; } KeyMap;
@@ -336,7 +379,104 @@ static void release_keys(uint32_t hwnd) {
     di_mouse_btn[0] = di_mouse_btn[1] = 0;
 }
 int user32_window_occluded(void) { return window_occluded; }
+int user32_key_held(int vk) { return vk >= 0 && vk < 256 && key_down[vk]; }   // portmenu.m on the Apple TV: modifier keys
 
+#if TARGET_OS_TV
+// ---- Apple TV: the host's events, queued on the main thread and handled here on the game thread ----
+// HID usage (page 7, GCKeyCode) -> Windows VK and set-1 scan code; the character a US keyboard types (shifted second).
+typedef struct { uint8_t vk, scan; char ch, shifted; } HidKey;
+static const HidKey hid_keys[0xE8] = {
+    [0x04] = {'A', 0x1E, 'a', 'A'}, [0x05] = {'B', 0x30, 'b', 'B'}, [0x06] = {'C', 0x2E, 'c', 'C'}, [0x07] = {'D', 0x20, 'd', 'D'},
+    [0x08] = {'E', 0x12, 'e', 'E'}, [0x09] = {'F', 0x21, 'f', 'F'}, [0x0A] = {'G', 0x22, 'g', 'G'}, [0x0B] = {'H', 0x23, 'h', 'H'},
+    [0x0C] = {'I', 0x17, 'i', 'I'}, [0x0D] = {'J', 0x24, 'j', 'J'}, [0x0E] = {'K', 0x25, 'k', 'K'}, [0x0F] = {'L', 0x26, 'l', 'L'},
+    [0x10] = {'M', 0x32, 'm', 'M'}, [0x11] = {'N', 0x31, 'n', 'N'}, [0x12] = {'O', 0x18, 'o', 'O'}, [0x13] = {'P', 0x19, 'p', 'P'},
+    [0x14] = {'Q', 0x10, 'q', 'Q'}, [0x15] = {'R', 0x13, 'r', 'R'}, [0x16] = {'S', 0x1F, 's', 'S'}, [0x17] = {'T', 0x14, 't', 'T'},
+    [0x18] = {'U', 0x16, 'u', 'U'}, [0x19] = {'V', 0x2F, 'v', 'V'}, [0x1A] = {'W', 0x11, 'w', 'W'}, [0x1B] = {'X', 0x2D, 'x', 'X'},
+    [0x1C] = {'Y', 0x15, 'y', 'Y'}, [0x1D] = {'Z', 0x2C, 'z', 'Z'},
+    [0x1E] = {'1', 0x02, '1', '!'}, [0x1F] = {'2', 0x03, '2', '@'}, [0x20] = {'3', 0x04, '3', '#'}, [0x21] = {'4', 0x05, '4', '$'},
+    [0x22] = {'5', 0x06, '5', '%'}, [0x23] = {'6', 0x07, '6', '^'}, [0x24] = {'7', 0x08, '7', '&'}, [0x25] = {'8', 0x09, '8', '*'},
+    [0x26] = {'9', 0x0A, '9', '('}, [0x27] = {'0', 0x0B, '0', ')'},
+    [0x28] = {0x0D, 0x1C, '\r', '\r'}, [0x29] = {0x1B, 0x01, 0, 0}, [0x2A] = {0x08, 0x0E, 8, 8}, [0x2B] = {0x09, 0x0F, 0, 0},
+    [0x2C] = {0x20, 0x39, ' ', ' '}, [0x2D] = {0xBD, 0x0C, '-', '_'}, [0x2E] = {0xBB, 0x0D, '=', '+'}, [0x2F] = {0xDB, 0x1A, '[', '{'},
+    [0x30] = {0xDD, 0x1B, ']', '}'}, [0x31] = {0xDC, 0x2B, '\\', '|'}, [0x33] = {0xBA, 0x27, ';', ':'}, [0x34] = {0xDE, 0x28, '\'', '"'},
+    [0x35] = {0xC0, 0x29, '`', '~'}, [0x36] = {0xBC, 0x33, ',', '<'}, [0x37] = {0xBE, 0x34, '.', '>'}, [0x38] = {0xBF, 0x35, '/', '?'},
+    [0x39] = {0x14, 0x3A, 0, 0},
+    [0x3A] = {0x70, 0x3B}, [0x3B] = {0x71, 0x3C}, [0x3C] = {0x72, 0x3D}, [0x3D] = {0x73, 0x3E}, [0x3E] = {0x74, 0x3F}, [0x3F] = {0x75, 0x40},
+    [0x40] = {0x76, 0x41}, [0x41] = {0x77, 0x42}, [0x42] = {0x78, 0x43}, [0x43] = {0x79, 0x44}, [0x44] = {0x7A, 0x57}, [0x45] = {0x7B, 0x58},
+    [0x49] = {0x2D, 0x52}, [0x4A] = {0x24, 0x47}, [0x4B] = {0x21, 0x49}, [0x4C] = {0x2E, 0x53}, [0x4D] = {0x23, 0x4F}, [0x4E] = {0x22, 0x51},
+    [0x4F] = {0x27, 0x4D}, [0x50] = {0x25, 0x4B}, [0x51] = {0x28, 0x50}, [0x52] = {0x26, 0x48},
+    [0x54] = {0x6F, 0x35, '/', '/'}, [0x55] = {0x6A, 0x37, '*', '*'}, [0x56] = {0x6D, 0x4A, '-', '-'}, [0x57] = {0x6B, 0x4E, '+', '+'},
+    [0x58] = {0x0D, 0x1C, '\r', '\r'}, [0x59] = {0x61, 0x4F, '1', '1'}, [0x5A] = {0x62, 0x50, '2', '2'}, [0x5B] = {0x63, 0x51, '3', '3'},
+    [0x5C] = {0x64, 0x4B, '4', '4'}, [0x5D] = {0x65, 0x4C, '5', '5'}, [0x5E] = {0x66, 0x4D, '6', '6'}, [0x5F] = {0x67, 0x47, '7', '7'},
+    [0x60] = {0x68, 0x48, '8', '8'}, [0x61] = {0x69, 0x49, '9', '9'}, [0x62] = {0x60, 0x52, '0', '0'}, [0x63] = {0x6E, 0x53, '.', '.'},
+    [0xE0] = {0x11, 0x1D}, [0xE1] = {0x10, 0x2A}, [0xE2] = {0x12, 0x38}, [0xE3] = {0x5B, 0x5B},
+    [0xE4] = {0x11, 0x1D}, [0xE5] = {0x10, 0x36}, [0xE6] = {0x12, 0x38}, [0xE7] = {0x5B, 0x5B},
+};
+enum { TV_EV_KEY, TV_EV_FOCUS };
+typedef struct { int type; uint32_t a; int b; } TvEvent;
+static TvEvent tv_events[256];
+static unsigned tv_ev_head, tv_ev_tail;
+static pthread_mutex_t tv_ev_lock = PTHREAD_MUTEX_INITIALIZER;
+static void tv_event_push(int type, uint32_t a, int b) {
+    pthread_mutex_lock(&tv_ev_lock);
+    if (tv_ev_head - tv_ev_tail < 256) tv_events[tv_ev_head++ & 255] = (TvEvent){type, a, b};
+    pthread_mutex_unlock(&tv_ev_lock);
+}
+void user32_tv_key(uint32_t hid, int down) { tv_event_push(TV_EV_KEY, hid, down); }
+void user32_tv_focus(int active) { tv_event_push(TV_EV_FOCUS, 0, active); }
+static void tv_focus(uint32_t hwnd, int active) {
+    if (active) {
+        feedback_poll_pause();
+        feedback_suppress(FEEDBACK_FOCUS, 0);
+        if (diag_on) diag_event("window focused");
+        fprintf(stderr, "boot: the app is in front again\n");
+        post(hwnd, 0x001C, 1, 0);        // WM_ACTIVATEAPP
+        post(hwnd, 0x0006, 1, 0);        // WM_ACTIVATE (WA_ACTIVE)
+        post(hwnd, 0x0007, 0, 0);        // WM_SETFOCUS
+    } else {
+        if (diag_on) diag_event("window lost focus");
+        feedback_suppress(FEEDBACK_FOCUS, 1);
+        release_keys(hwnd);
+        fprintf(stderr, "boot: the app left the screen: the game pauses until it's back\n");
+        padfx_stop();
+        post(hwnd, 0x0006, 0, 0);
+        post(hwnd, 0x001C, 0, 0);
+        post(hwnd, 0x0008, 0, 0);        // WM_KILLFOCUS
+    }
+}
+static void tv_events_drain(void) {
+    for (;;) {
+        TvEvent e;
+        pthread_mutex_lock(&tv_ev_lock);
+        int have = tv_ev_tail != tv_ev_head;
+        if (have) e = tv_events[tv_ev_tail++ & 255];
+        pthread_mutex_unlock(&tv_ev_lock);
+        if (!have) break;
+        uint32_t hwnd = focus_hwnd;
+        if (e.type == TV_EV_FOCUS) { tv_focus(hwnd, e.b); continue; }
+        HidKey k = e.a < sizeof hid_keys / sizeof hid_keys[0] ? hid_keys[e.a] : (HidKey){0};
+        if (!k.vk) continue;
+        if (e.b) prompts_input(0);
+        int repeat = e.b && key_down[k.vk];
+        key_event(hwnd, k.vk, k.scan, e.b, repeat);
+        if (e.b && k.ch) {
+            int upper = (key_down[0x10] != 0) ^ (k.ch >= 'a' && k.ch <= 'z' && (key_toggled[0x14] & 1));
+            uint32_t ch = (uint8_t)(upper ? k.shifted : k.ch);
+            if (!portmenu_char(ch)) post(hwnd, 0x0102, ch, 1);   // WM_CHAR
+        }
+    }
+}
+static void pump(int wait) {
+    if (headless) return;
+    @autoreleasepool {
+        if (wait) tv_host_wait(0.05);
+        tv_events_drain();
+        portmenu_update();
+        // The game thread has no run loop: commit the layer changes made since the last frame (menu, overlay).
+        [CATransaction flush];
+    }
+}
+#else
 static void view_to_client(const Win *w, NSPoint p, int *x, int *y);
 static void pump(int wait) {
     if (headless) return;
@@ -440,7 +580,38 @@ static void pump(int wait) {
         portmenu_update();
     }
 }
+#endif
 
+#if TARGET_OS_TV
+// The game window is the host's full-screen view: the layer shows the back buffer scaled to the TV, keeping its aspect.
+static int ns_fullscreen(const Win *w) { (void)w; return 1; }
+static void ns_apply_mode(Win *w) { (void)w; }
+static void ns_mode_changed(Win *w) {
+    if (w->mode_logged) return;
+    w->mode_logged = 1;
+    render_presentation_changed();
+    fprintf(stderr, "boot: fullscreen: the TV, %dx%d back buffer\n", w->cw, w->ch);
+    report_note("fullscreen: Apple TV");
+}
+static void ns_set_fullscreen(Win *w, int full) { (void)w; (void)full; }
+static void ns_close(Win *w) { (void)w; }
+static void ns_create(Win *w, const char *title) {
+    (void)title;
+    if (headless) return;
+    w->full = 1;
+    for (int i = 0; i < 500 && !tv_host_layer(); ++i) usleep(10000);   // the scene connects before the game starts
+    w->ns = tv_host_window();
+    w->view = tv_host_view();
+    if (tv_host_layer()) tv_host_layer().drawableSize = CGSizeMake(w->cw, w->ch);
+}
+static void ns_show(Win *w, int show) {
+    w->visible = show;
+    if (show && w->ns) ns_mode_changed(w);
+}
+static void ns_resize(Win *w) {           // the game changed resolution
+    if (w->ns && tv_host_layer()) tv_host_layer().drawableSize = CGSizeMake(w->cw, w->ch);
+}
+#else
 // Full screen, the window covers the screen (below the camera housing on screens that have one) and the layer scales
 // the back buffer to it keeping its aspect (black bars when they differ). Windowed, it shows its client area pixel for
 // pixel (points = pixels / backing scale), shrunk to fit the screen if it's larger. The client area stays in
@@ -584,6 +755,7 @@ static void ns_resize(Win *w) {           // the game changed resolution
     else { w->ns.contentAspectRatio = NSMakeSize(w->cw, w->ch); [w->ns setContentSize:ns_content_rect(w).size]; }
     ((CAMetalLayer *)w->view.layer).drawableSize = CGSizeMake(w->cw, w->ch);
 }
+#endif
 // app.m's View > Enter Full Screen (Ctrl-Cmd-F).
 static Win *game_window(void) {
     for (int i = 0; i < MAX_WINDOWS; ++i) if (wins[i].used && wins[i].wndproc && wins[i].ns) return &wins[i];
@@ -613,6 +785,10 @@ void user32_toggle_fullscreen(void) { Win *w = game_window(); if (w) ns_set_full
 void user32_menu_opening(void) { release_keys(focus_hwnd); }
 // padprompts.c: the controller is the input being used: no pointer until the mouse moves (it comes back with the first
 // movement, which is also what hands the prompts back to the keyboard and mouse; F21).
+#if TARGET_OS_TV
+void user32_hide_pointer(void) {}      // no pointer on the Apple TV
+void user32_menu_cursor(void) {}
+#else
 void user32_hide_pointer(void) {
     if (headless > 0) return;
     if (NSThread.isMainThread) [NSCursor setHiddenUntilMouseMoves:YES];
@@ -622,6 +798,7 @@ void user32_menu_cursor(void) {        // the system arrow over the game while t
     Win *w = game_window();
     if (w && w->ns && w->view) [w->ns invalidateCursorRectsForView:w->view];
 }
+#endif
 int user32_request_close(void) {
     Win *w = game_window();
     if (w) { rumble_close(); padfx_close(); post(hwnd_of(w), 0x0010, 0, 0); }   // WM_CLOSE: the game's own exit path
@@ -748,6 +925,13 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
         // window's delegate gets the focus changes directly (AppKit won't activate an app the user isn't using);
         // the game stops drawing while inactive, so the way back is timed, not counted in frames.
         Win *w = win(focus_hwnd);
+#if TARGET_OS_TV
+        if (w) {                         // the host's focus events, timed the same way
+            double secs = atof(strchr(tok, ':') + 1);
+            user32_tv_focus(0);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(secs * 1e9)), dispatch_get_main_queue(), ^{ user32_tv_focus(1); });
+        }
+#else
         if (w && w->ns) {
             int hide = tok[0] == 'h';
             GameWindowDelegate *d = (GameWindowDelegate *)w->ns.delegate;
@@ -758,6 +942,7 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
                 [d windowDidBecomeKey:nil];
             });
         }
+#endif
         if (diag_on) diag_event("script: %s", tok);
         ++step; step_start = 0;
     } else if (!strncmp(tok, "carnm:", 6)) {   // test only: NFS_CAR_NORMALMAPS live (x360|pc), for same-view A/B shots in the front end
@@ -833,11 +1018,15 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
         ++step; step_start = 0;
     } else if (!strncmp(tok, "cmdopt:", 7)) {
         // A menu shortcut, as the pump hands Cmd keys to the menu bar (scripted runs drop real key events).
+#if TARGET_OS_TV
+        BOOL done = NO;                  // no menu bar
+#else
         NSString *k = [[NSString stringWithUTF8String:tok + 7] lowercaseString];
         NSEvent *e = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
                                  modifierFlags:NSEventModifierFlagCommand | NSEventModifierFlagOption timestamp:0 windowNumber:0
                                        context:nil characters:k charactersIgnoringModifiers:k isARepeat:NO keyCode:0];
         BOOL done = [NSApp.mainMenu performKeyEquivalent:e];
+#endif
         if (diag_on) diag_event("script: %s %s", tok, done ? "handled by the menu" : "not a menu shortcut");
         ++step; step_start = 0;
     } else if (!strncmp(tok, "padlayout:", 10)) {
@@ -981,8 +1170,10 @@ static void display_poll(void) {
         if (screen_dirty != 2) read_main_screen();
         screen_dirty = 0;
         fprintf(stderr, "boot: display changed: %dx%d points at %.0fx\n", screen_w, screen_h, screen_scale);
+#if !TARGET_OS_TV
         Win *w = game_window();
         if (w && w->ns && ns_fullscreen(w) && !app_native_fullscreen()) { [w->ns setFrame:ns_content_rect(w) display:YES]; fprintf(stderr, "boot: full screen window re-fit\n"); }
+#endif
         widescreen_display_changed();
     }
 }
@@ -1008,7 +1199,11 @@ void user32_script(uint64_t frame, uint64_t draws) {
 // The D3D9 layer renders into this.
 void *user32_metal_layer(uint32_t hwnd) {
     Win *w = win(hwnd);
+#if TARGET_OS_TV
+    return w && w->view ? (__bridge void *)tv_host_layer() : NULL;
+#else
     return w && w->view ? (__bridge void *)w->view.layer : NULL;
+#endif
 }
 void user32_client_size(uint32_t hwnd, int *cw, int *ch) {
     Win *w = win(hwnd);
@@ -1019,7 +1214,12 @@ void user32_screen_size(int *w, int *h) { cocoa_init(); *w = screen_w; *h = scre
 // Highest refresh rate of the main display (120 on ProMotion MacBook Pros, 60 on most external displays).
 int user32_display_hz(void) {
     cocoa_init();
+#if TARGET_OS_TV
+    int hz = 60;
+    tv_host_screen(NULL, NULL, NULL, &hz);
+#else
     NSInteger hz = [[NSScreen mainScreen] maximumFramesPerSecond];
+#endif
     return hz > 0 ? (int)hz : 60;
 }
 // The full screen size in pixels (below the camera housing on screens that have one): the widescreen "native" mode.
@@ -1070,10 +1270,14 @@ static void wait_messages(void) {
     if (headless) return;
     diag_idle(1);
     gil_release();
+#if TARGET_OS_TV
+    tv_host_wait(0.05);                  // a host event (focus back, a key) wakes it early
+#else
     @autoreleasepool {
         [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]
                               inMode:NSDefaultRunLoopMode dequeue:NO];
     }
+#endif
     gil_acquire();
 }
 
@@ -1224,7 +1428,11 @@ int win32_user32(Cpu *c, const char *fn) {
     if (!strcmp(fn, "GetForegroundWindow")) RET(focus_hwnd, 0);
     if (!strcmp(fn, "SetForegroundWindow")) { Win *w = win(arg(c, 0)); if (w) focus_hwnd = arg(c, 0); RET(w != NULL, 1); }
     if (!strcmp(fn, "SetFocus")) { uint32_t old = focus_hwnd; if (win(arg(c, 0))) focus_hwnd = arg(c, 0); RET(old, 1); }
+#if TARGET_OS_TV
+    if (!strcmp(fn, "IsIconic")) RET(0, 1);
+#else
     if (!strcmp(fn, "IsIconic")) { Win *w = win(arg(c, 0)); RET(w && w->ns && w->ns.miniaturized, 1); }
+#endif
     if (!strcmp(fn, "SetCapture")) { uint32_t old = capture_hwnd; capture_hwnd = arg(c, 0); RET(old, 1); }
     if (!strcmp(fn, "ReleaseCapture")) { capture_hwnd = 0; RET(1, 0); }
     if (!strcmp(fn, "LoadIconA") || !strcmp(fn, "LoadCursorA")) RET(gdi_next++, 2);
@@ -1233,7 +1441,9 @@ int win32_user32(Cpu *c, const char *fn) {
         cursor_count += arg(c, 0) ? 1 : -1;
         if (cursor_hidden != (cursor_count < 0)) {      // over the game view only, not the title bar or the menu bar
             cursor_hidden = cursor_count < 0;
+#if !TARGET_OS_TV
             for (int i = 0; i < MAX_WINDOWS; ++i) if (wins[i].used && wins[i].ns) [wins[i].ns invalidateCursorRectsForView:wins[i].view];
+#endif
         }
         RET((uint32_t)cursor_count, 1);
     }
@@ -1272,7 +1482,7 @@ int win32_user32(Cpu *c, const char *fn) {
         uint32_t out = arg(c, 0), min = arg(c, 2), max = arg(c, 3), rm = get ? 1 : arg(c, 4);
         // Another thread's queue is empty (messages go to the window's thread): NetworkCore::Flush (0078B190) pumps from
         // the online network thread at the race start, and AppKit throws when events are pumped off the main thread.
-        if (!pthread_main_np()) {
+        if (!ON_GAME_MAIN_THREAD()) {
             if (!get) RET(0, 5);
             memset(G + out, 0, 28);                               // GetMessage: a WM_NULL after a short wait
             gil_release(); usleep(10000); gil_acquire();
@@ -1582,7 +1792,7 @@ static void pad_presence(int idx, int present, const char *what) {
         if (idx == 0) pad_menu_keys(0);                 // the menu keys it held are released
     }
     if (diag_on) diag_event("pad: %s%s (app active %d)", present ? "connected: " : first ? "none at start-up" : "disconnected",
-                            present ? what : "", headless ? 0 : (int)NSApp.isActive);
+                            present ? what : "", headless ? 0 : (int)APP_ACTIVE());
 }
 // Cache the restart-only opt-in once: default reads retain the original single-controller scan,
 // without slot locks, allocation or a second GCController.controllers fetch.
@@ -1783,7 +1993,7 @@ int pad_read_n(int idx, PadState *st) {
             ctl = pad_controller_n(idx);
             if (!idx) padlink_observe(ctl);
         }
-        if (!headless && !NSApp.isActive) { st->connected = 1; st->native = kind_native(pad_kinds[idx]); return 1; }
+        if (!headless && !APP_ACTIVE()) { st->connected = 1; st->native = kind_native(pad_kinds[idx]); return 1; }
         GCExtendedGamepad *g = ctl.extendedGamepad;
         if ((g != nil) != pad_presents[idx])
             pad_presence(idx, g != nil, g ? [NSString stringWithFormat:@"%@ (%@, %lu controllers)", ctl.vendorName ?: @"controller",
@@ -1833,9 +2043,11 @@ int pad_read_n(int idx, PadState *st) {
         phys = (phys & ~hide) | inject;
         if (kind_native(kind)) {           // PS, the touchpad click, the Edge's back paddles, when not the menu's shortcut
             GCControllerButtonInput *lp = nil, *rp = nil;
+#if !TARGET_OS_TV                         // the Edge's paddles have no GameController names on tvOS
             if (kind == PAD_KIND_EDGE) if (@available(macOS 13.0, *)) {
                 lp = ctl.physicalInputProfile.buttons[GCInputLeftPaddle]; rp = ctl.physicalInputProfile.buttons[GCInputRightPaddle];
             }
+#endif
             uint32_t extras = (home.pressed ? 1u << P_PS : 0) | (touch.pressed ? 1u << P_TOUCHPAD : 0) |
                               (lp.pressed ? 1u << P_LPADDLE : 0) | (rp.pressed ? 1u << P_RPADDLE : 0);
             pad_native(st, phys | (extras & (idx == 0 ? pad_game_extras(touch != nil) : 0xF000u)));
@@ -1854,7 +2066,7 @@ int pad_read_n(int idx, PadState *st) {
             if (st->buttons != last.buttons || st->pov != last.pov || d > 0.25f) {
                 diag_event("pad: buttons %03X pov %d lx %.2f ly %.2f rx %.2f ry %.2f lt %.2f rt %.2f, %s (package in control %s, app active %d)",
                            st->buttons, st->pov, st->lx, st->ly, st->rx, st->ry, st->lt, st->rt, pad_mode, pad_ctl ? pad_ctl : "none",
-                           (int)NSApp.isActive);
+                           (int)APP_ACTIVE());
                 lasts[idx] = *st;
             }
         }

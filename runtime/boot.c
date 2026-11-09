@@ -345,8 +345,17 @@ static void save_cleanup(void) {
     char path[1024];
     if (snprintf(path, sizeof path, "%s", root) >= (int)sizeof path) return;
     // Check every component, including a symlink supplied as BOOT_USERDATA (also with a trailing slash).
+#include <TargetConditionals.h>
+#if defined(TARGET_OS_TV) && TARGET_OS_TV
+    // The Apple TV's sandbox refuses opening the folders above the app's container; the host passes this folder with
+    // realpath (no symlink in it).
+    int fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return;
+    path[0] = 0;
+#else
     int fd = open(root[0] == '/' ? "/" : ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (fd < 0) return;
+#endif
     char *next;
     for (char *part = strtok_r(path, "/", &next); part; part = strtok_r(NULL, "/", &next)) {
         int sub = openat(fd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);

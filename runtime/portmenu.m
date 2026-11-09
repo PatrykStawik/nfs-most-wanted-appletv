@@ -25,7 +25,13 @@
 // resolution, nothing drawn while closed) holding the panel, rasterized with CoreText into a bitmap at most once a
 // frame and only when something changed (once a second for the live readouts), plus a dim layer over the game.
 // BOOT_DIAG_SHOTS frames with the menu open also write menu_NNNNN.png (the panel with alpha) for composites.
+#include <TargetConditionals.h>
+#if TARGET_OS_TV
+#import <UIKit/UIKit.h>
+#include "tv_host.h"
+#else
 #import <Cocoa/Cocoa.h>
+#endif
 #import <CoreText/CoreText.h>
 #import <QuartzCore/QuartzCore.h>
 #include <ctype.h>
@@ -41,6 +47,22 @@
 #include "report_github.h"
 #include "onscreen_keyboard.h"
 void osk_pass(Cpu *c);
+// Modifier keys and the window's backing scale. Apple TV: a paired keyboard's keys (user32.m), the host's screen scale.
+enum { PM_SHIFT = 1, PM_CONTROL = 2, PM_COMMAND = 4 };
+#if TARGET_OS_TV
+int user32_key_held(int vk);
+static unsigned pm_mods(void) {
+    return (user32_key_held(0x10) ? PM_SHIFT : 0) | (user32_key_held(0x11) ? PM_CONTROL : 0) | (user32_key_held(0x5B) ? PM_COMMAND : 0);
+}
+static CGFloat pm_backing(id v) { (void)v; double k = 1; tv_host_screen(NULL, NULL, &k, NULL); return k > 0 ? k : 1; }
+#else
+static unsigned pm_mods(void) {
+    NSEventModifierFlags f = NSEvent.modifierFlags;
+    return (f & NSEventModifierFlagShift ? PM_SHIFT : 0) | (f & NSEventModifierFlagControl ? PM_CONTROL : 0) |
+           (f & NSEventModifierFlagCommand ? PM_COMMAND : 0);
+}
+static CGFloat pm_backing(id v) { return [v isKindOfClass:NSView.class] && ((NSView *)v).window ? ((NSView *)v).window.backingScaleFactor : 2; }
+#endif
 
 #define GAMEFLOW_STATE 0x00925E90u       // 3 front end, 6 racing
 #define SND_CTL_STATES 0x00911FE8u       // g_ActiveCtlStates (SetSoundControlState 004B9080)
@@ -77,7 +99,11 @@ void portmenu_status(const char *fmt, ...) {
 }
 void portmenu_open_folder(const char *path) {
     if (getenv("BOOT_KEYS")) { portmenu_status("%s (not opened in scripted runs)", path); return; }
+#if TARGET_OS_TV
+    portmenu_status("%s", path);         // no Finder on the Apple TV: the path, for tvos/tv.sh log
+#else
     @autoreleasepool { [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:[NSString stringWithUTF8String:path]]]; }
+#endif
 }
 
 // The rows of a category, in menu order (each setting's order key; settings.c).
@@ -152,7 +178,11 @@ static void change(Setting *s, int d) {
 static void paste_text(void) {
     Setting *s = current();
     if (!is_open || !editing || !s || s->type != SET_TEXT) return;
+#if TARGET_OS_TV
+    NSString *paste = nil;               // no pasteboard on the Apple TV
+#else
     NSString *paste = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
+#endif
     if (!paste) return;
     NSData *raw = [paste dataUsingEncoding:NSUTF8StringEncoding];
     // Keep the raw text for the submitter to validate. Filtering characters
@@ -182,6 +212,7 @@ static void set_open(int o) {
     feedback_poll_pause();
     feedback_suppress(FEEDBACK_MENU, o); // stop before holding the sim; independent of the game's own pause menu
     if (o) {
+#if !TARGET_OS_TV
         static id paste_monitor;
         if (!paste_monitor) paste_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
             if (is_open && editing && event.keyCode == 9 && (event.modifierFlags & NSEventModifierFlagCommand)) {
@@ -189,6 +220,7 @@ static void set_open(int o) {
             }
             return event;
         }];
+#endif
         user32_menu_opening();           // keys and buttons held now are released to the game first
         clamp_sel();
     }
@@ -287,16 +319,16 @@ int portmenu_key(uint8_t vk, int down, int repeat) {
             editing = 0; dirty = 1; osk_note_end(vk == 0x1B);
             if (vk == 0x0D && s && s->apply) s->apply(0);
         }
-        else if (vk == 'V' && (NSEvent.modifierFlags & NSEventModifierFlagCommand) && s) {
+        else if (vk == 'V' && (pm_mods() & PM_COMMAND) && s) {
             paste_text();
         }
         else if (s && s->type == SET_TEXT) {
-            NSEventModifierFlags mods = NSEvent.modifierFlags;
-            if (text_edit_key(s->text, vk, (mods & NSEventModifierFlagCommand) != 0, (mods & NSEventModifierFlagControl) != 0)) dirty = 1;
+            unsigned mods = pm_mods();
+            if (text_edit_key(s->text, vk, (mods & PM_COMMAND) != 0, (mods & PM_CONTROL) != 0)) dirty = 1;
         }
         return 1;
     }
-    int shift = (NSEvent.modifierFlags & NSEventModifierFlagShift) != 0;
+    int shift = (pm_mods() & PM_SHIFT) != 0;
     switch (vk) {
     case 0x1B: set_open(0); break;                          // Esc
     case 0x26: move(-1); break;                             // Up
@@ -603,7 +635,7 @@ static int render(void) {
     colors();
     CGSize view = layer.bounds.size;
     id v = layer.delegate;
-    CGFloat backing = [v isKindOfClass:NSView.class] && ((NSView *)v).window ? ((NSView *)v).window.backingScaleFactor : 2;
+    CGFloat backing = pm_backing(v);
     double f = fit_scale(view), k = f * backing;
     size_t W = (size_t)ceil(PW * k), H = (size_t)ceil(PH * k);
     if (!panel_background || W != CGBitmapContextGetWidth(panel_background) ||
@@ -839,7 +871,7 @@ static void keyboard_update(void) {
     const OskCapture *s = osk_capture();
     CGSize view = layer.bounds.size;
     id v = layer.delegate;
-    CGFloat backing = [v isKindOfClass:NSView.class] && ((NSView *)v).window ? ((NSView *)v).window.backingScaleFactor : 2;
+    CGFloat backing = pm_backing(v);
     double f = fmin(fit_scale(view), fmax(0.3, (view.height * 0.46 - 12) / (PH - 298)));
     KeyboardPixels pixels = {0};
     pixels.W = (size_t)ceil(PW * f * backing); pixels.H = (size_t)ceil(PH * f * backing);
@@ -946,7 +978,7 @@ void portmenu_update(void) {
     static CGSize last_size;
     static CGFloat last_backing;
     id view = layer.delegate;
-    CGFloat backing = [view isKindOfClass:NSView.class] && ((NSView *)view).window ? ((NSView *)view).window.backingScaleFactor : 2;
+    CGFloat backing = pm_backing(view);
     if (!CGSizeEqualToSize(layer.bounds.size, last_size) || backing != last_backing) {
         last_size = layer.bounds.size; last_backing = backing; dirty = 1;
     }

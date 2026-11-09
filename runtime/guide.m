@@ -1,5 +1,10 @@
 // Bundled UTF-8 documents, CoreText layout and controller shortcut arbitration.
+#include <TargetConditionals.h>
+#if TARGET_OS_TV
+#import <Foundation/Foundation.h>
+#else
 #import <Cocoa/Cocoa.h>
+#endif
 #import <CoreText/CoreText.h>
 #include "guide.h"
 #include "settings.h"
@@ -39,7 +44,11 @@ double guide_scale_cap(void) { return active ? 2 : 1; }   // a large panel; the 
 void guide_close(void) { active=0; }
 
 static NSDictionary *attributes(double size, int bold) {
+#if TARGET_OS_TV
+    id font = CFBridgingRelease(CTFontCreateUIFontForLanguage(bold ? kCTFontUIFontEmphasizedSystem : kCTFontUIFontSystem, size, NULL));
+#else
     NSFont *font = bold ? [NSFont boldSystemFontOfSize:size] : [NSFont systemFontOfSize:size];
+#endif
     return @{(__bridge NSString *)kCTFontAttributeName:font,
              (__bridge NSString *)kCTForegroundColorAttributeName:(__bridge id)CGColorGetConstantColor(kCGColorWhite)};
 }

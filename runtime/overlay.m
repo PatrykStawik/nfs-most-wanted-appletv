@@ -19,8 +19,14 @@
 // CoreText into a texture; the presenter draws that texture plus the graph and rumble bars, which follow every frame.
 // With BOOT_DIAG and the overlay on, overlay.log gets the panel text once a second (to check it against stats.log),
 // and each BOOT_DIAG_SHOTS frame also writes overlay_NNNNN_compact.png and _full.png (the panel as drawn, with alpha).
+#include <TargetConditionals.h>
+#if TARGET_OS_TV
+#import <UIKit/UIKit.h>
+#include "tv_host.h"
+#else
 #import <Cocoa/Cocoa.h>
 #import <CoreAudio/CoreAudio.h>
+#endif
 #import <CoreText/CoreText.h>
 #import <GameController/GameController.h>
 #include <mach/mach.h>
@@ -115,6 +121,10 @@ static uint64_t rss_now(void) {
     return task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &n) == KERN_SUCCESS ? info.resident_size : 0;
 }
 static void default_device_name(char *out, size_t n) {
+#if TARGET_OS_TV
+    tv_audio_route_name(out, n);
+}
+#else
     AudioObjectPropertyAddress a = {kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
     AudioDeviceID dev = 0;
     UInt32 sz = sizeof dev;
@@ -127,6 +137,7 @@ static void default_device_name(char *out, size_t n) {
     CFStringGetCString(name, out, (CFIndex)n, kCFStringEncodingUTF8);
     CFRelease(name);
 }
+#endif
 
 uint32_t galloc_used(void);
 uint32_t gmalloc_used(void);
@@ -559,9 +570,15 @@ static void capture(const Snap *s, uint64_t frame) {
 // ---------------- the layer (main thread = the game thread) ----------------
 // The window's backing scale (the game's CAMetalLayer keeps contentsScale 1: its drawable is the back buffer's size).
 static CGFloat backing_scale(void) {
+#if TARGET_OS_TV
+    double k = 1;                                                // the TV's points are the game's pixels
+    tv_host_screen(NULL, NULL, &k, NULL);
+    return k > 0 ? k : 1;
+#else
     id v = layer.delegate;                                       // a view's backing layer: the view
     CGFloat k = [v isKindOfClass:NSView.class] ? ((NSView *)v).window.backingScaleFactor : 0;
     return k > 0 ? k : NSScreen.mainScreen.backingScaleFactor > 0 ? NSScreen.mainScreen.backingScaleFactor : 1;
+#endif
 }
 static void layer_update(void) {
     if (!layer) return;
@@ -593,7 +610,12 @@ static void layer_update(void) {
     if (!show) return;
     CGFloat k = backing_scale(), m = 12;
     CGSize b = parent.bounds.size;
-    CGRect fr = CGRectMake(m, parent.geometryFlipped ? m : b.height - m - h / k, w / k, h / k);
+#if TARGET_OS_TV
+    int top_left = 1;                                            // UIKit layers: the origin is the top left
+#else
+    int top_left = parent.geometryFlipped;
+#endif
+    CGRect fr = CGRectMake(m, top_left ? m : b.height - m - h / k, w / k, h / k);
     if (olayer.contentsScale != k) olayer.contentsScale = k;
     if (!CGRectEqualToRect(olayer.frame, fr)) olayer.frame = fr;
     if (olayer.drawableSize.width != w || olayer.drawableSize.height != h) olayer.drawableSize = CGSizeMake(w, h);

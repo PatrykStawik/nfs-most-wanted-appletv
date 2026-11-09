@@ -82,11 +82,24 @@ static int open_relative(int base,const char *path,int directory) {
         p=slash+1;
     }
 }
-static int root_open(void) {
-    if (*userdata!='/' || !relative(userdata+1)) { errno=EINVAL; return -1; }
+#include <TargetConditionals.h>
+/* An absolute path opened component by component without following symlinks. The Apple TV's sandbox refuses opening
+ * the folders above the app's container ("/", "/private/var/mobile"...), so there the walk starts at the user-data
+ * folder itself (the host passes it with realpath: no symlink in it) and continues below it with O_NOFOLLOW. */
+static int open_absolute(const char *path,int directory) {
+    if (!path || *path!='/' || !relative(path+1)) { errno=EINVAL; return -1; }
+#if TARGET_OS_TV
+    size_t n=strlen(userdata);
+    if (n && !strncmp(path,userdata,n) && (path[n]=='/' || !path[n])) {
+        int base=open(userdata,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC); if (base<0) return -1;
+        if (!path[n]) return base;
+        int fd=open_relative(base,path+n+1,directory); int e=errno; close(base); errno=e; return fd;
+    }
+#endif
     int base=open("/",O_RDONLY|O_DIRECTORY|O_CLOEXEC); if (base<0) return -1;
-    int fd=open_relative(base,userdata+1,1); close(base); return fd;
+    int fd=open_relative(base,path+1,directory); int e=errno; close(base); errno=e; return fd;
 }
+static int root_open(void) { return open_absolute(userdata,1); }
 static int metadata_root(int create) {
     int base=root_open(); if (base<0) return -1;
     if (create) {
@@ -354,9 +367,7 @@ void carsave_public_serialize(Cpu *c) {
 /* The file layer calls prepare before any rename and calls allowed at every
  * write/truncate/close, even when the descriptor predates admission refusal. */
 static int read_payload(const char *path,unsigned char *bytes,struct stat *st) {
-    if (!path || *path!='/' || !relative(path+1)) return -1;
-    int root=open("/",O_RDONLY|O_DIRECTORY|O_CLOEXEC); if (root<0) return -1;
-    int fd=open_relative(root,path+1,0); close(root); if (fd<0) return -1;
+    int fd=open_absolute(path,0); if (fd<0) return -1;
     int ok=!fstat(fd,st) && S_ISREG(st->st_mode) && st->st_nlink==1;
     if (ok && st->st_size==CARSAVE_PUBLIC_SIZE+36)
         ok=pread(fd,bytes,CARSAVE_PUBLIC_SIZE,36)==CARSAVE_PUBLIC_SIZE;

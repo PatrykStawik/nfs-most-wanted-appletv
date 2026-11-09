@@ -349,10 +349,68 @@ static uint64_t fnv(const void *p, size_t n, uint64_t h) {
 }
 
 // ---------------- formats ----------------
-// D3DFORMAT -> Metal pixel format; *conv set when the data needs CPU conversion to BGRA8 on upload.
+// A GPU without BC (DXT) sampling (some Apple TV chips): the game's DXT textures are unpacked to BGRA8 on upload instead
+// (4 bytes a pixel, 4 to 8 times their memory). NFS_BC_DECODE=1 forces the unpacking on a Mac, to test it.
+static int bc_native(void) {
+    static int v = -1;
+    if (v < 0) {
+        v = 0;
+        if (@available(macOS 11.0, iOS 16.4, tvOS 16.4, *)) v = mtl && mtl.supportsBCTextureCompression;
+        const char *e = getenv("NFS_BC_DECODE");
+        if (e && *e && *e != '0') v = 0;
+        fprintf(stderr, "render: BC (DXT) textures %s\n", v ? "sampled by the GPU" : "unpacked to BGRA8 on upload (no BC sampling)");
+    }
+    return v;
+}
+// One 4x4 DXT1/3/5 block -> 16 BGRA8 pixels. DXT2/4 (premultiplied) decode as DXT3/5, as Metal's BC2/BC3 do. Colour
+// blocks of DXT3/5 always use the four-colour mode.
+static void dxt_block(uint32_t f, const uint8_t *b, uint8_t px[16][4]) {
+    int alpha_bytes = f == 0x31545844 ? 0 : 8;
+    const uint8_t *cb = b + alpha_bytes;
+    uint32_t c0 = cb[0] | cb[1] << 8, c1 = cb[2] | cb[3] << 8;
+    uint8_t pal[4][4];
+    for (int k = 0; k < 2; ++k) {
+        uint32_t c = k ? c1 : c0, r = c >> 11 & 31, g = c >> 5 & 63, bl = c & 31;
+        pal[k][0] = (uint8_t)(bl << 3 | bl >> 2); pal[k][1] = (uint8_t)(g << 2 | g >> 4); pal[k][2] = (uint8_t)(r << 3 | r >> 2); pal[k][3] = 255;
+    }
+    if (alpha_bytes || c0 > c1)
+        for (int ch = 0; ch < 3; ++ch) {
+            pal[2][ch] = (uint8_t)((2 * pal[0][ch] + pal[1][ch] + 1) / 3);
+            pal[3][ch] = (uint8_t)((pal[0][ch] + 2 * pal[1][ch] + 1) / 3);
+        }
+    else
+        for (int ch = 0; ch < 3; ++ch) { pal[2][ch] = (uint8_t)((pal[0][ch] + pal[1][ch]) / 2); pal[3][ch] = 0; }
+    pal[2][3] = 255; pal[3][3] = alpha_bytes || c0 > c1 ? 255 : 0;
+    uint32_t idx = cb[4] | cb[5] << 8 | cb[6] << 16 | (uint32_t)cb[7] << 24;
+    for (int i = 0; i < 16; ++i) memcpy(px[i], pal[idx >> 2 * i & 3], 4);
+    if (f == 0x32545844 || f == 0x33545844) {                                    // DXT2/3: explicit 4-bit alpha
+        for (int i = 0; i < 16; ++i) px[i][3] = (uint8_t)((b[i / 2] >> (i & 1) * 4 & 15) * 17);
+    } else if (alpha_bytes) {                                                     // DXT4/5: interpolated alpha
+        uint32_t a0 = b[0], a1 = b[1], a[8] = {a0, a1};
+        if (a0 > a1) for (int i = 1; i < 7; ++i) a[i + 1] = ((7 - i) * a0 + i * a1 + 3) / 7;
+        else { for (int i = 1; i < 5; ++i) a[i + 1] = ((5 - i) * a0 + i * a1 + 2) / 5; a[6] = 0; a[7] = 255; }
+        uint64_t bits = 0;
+        for (int i = 0; i < 6; ++i) bits |= (uint64_t)b[2 + i] << 8 * i;
+        for (int i = 0; i < 16; ++i) px[i][3] = (uint8_t)a[bits >> 3 * i & 7];
+    }
+}
+// A DXT level (rows of blocks, `pitch` bytes apart) -> w x h BGRA8 pixels.
+static void dxt_unpack(uint32_t f, const uint8_t *src, uint32_t pitch, uint32_t w, uint32_t h, uint8_t *dst) {
+    uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4, bytes = f == 0x31545844 ? 8 : 16;
+    uint8_t px[16][4];
+    for (uint32_t by = 0; by < bh; ++by)
+        for (uint32_t bx = 0; bx < bw; ++bx) {
+            dxt_block(f, src + (size_t)by * pitch + (size_t)bx * bytes, px);
+            for (uint32_t y = 0; y < 4 && by * 4 + y < h; ++y)
+                for (uint32_t x = 0; x < 4 && bx * 4 + x < w; ++x)
+                    memcpy(dst + ((size_t)(by * 4 + y) * w + bx * 4 + x) * 4, px[y * 4 + x], 4);
+        }
+}
+// D3DFORMAT -> Metal pixel format; *conv set when the data needs CPU conversion to BGRA8 on upload (2: DXT blocks).
 static MTLPixelFormat mtl_format(uint32_t f, int *conv, MTLTextureSwizzleChannels *sw) {
     *conv = 0;
     *sw = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha);
+    if (is_dxt(f) && !bc_native()) { *conv = 2; return MTLPixelFormatBGRA8Unorm; }
     switch (f) {
     case 21: return MTLPixelFormatBGRA8Unorm;                                   // A8R8G8B8
     case 22: sw->alpha = MTLTextureSwizzleOne; return MTLPixelFormatBGRA8Unorm; // X8R8G8B8
@@ -490,6 +548,9 @@ RenderTex *gpu_tex(Obj *t) {
                     free(tinted);
                 } else {
                     uint8_t *tmp = malloc((size_t)w * h * dd * 4);
+                    if (conv == 2)
+                        for (uint32_t z = 0; z < dd; ++z) dxt_unpack(t->fmt, G + m + (size_t)z * rows * pitch, pitch, w, h, tmp + (size_t)z * w * h * 4);
+                    else
                     for (uint32_t z = 0; z < dd; ++z)
                         for (uint32_t y = 0; y < h; ++y) convert_row(t->fmt, G + m + (z * rows + y) * pitch, tmp + ((size_t)z * h + y) * w * 4, w);
                     if (tint) probe_tint(t->fmt, tmp, (size_t)w * h * dd * 4, 1);
@@ -1808,7 +1869,8 @@ static void compile_entry(ShaderEntry *e) {
         // A failed grass variant must never masquerade as a successful grass shader:
         // the caller falls back to the complete variant-0 PC draw, with PC bindings.
         if (!lib && !e->variant) lib = shader_library(hdrclip_world_source([NSString stringWithUTF8String:e->refl.msl],e->key,e->mat,e->variant), co, &err);
-        if (!lib) fprintf(stderr, "boot: render: MSL compile failed: %s\n", err.localizedDescription.UTF8String);
+        // No error: a variant with no replacement source (an X360 payload without the X360 files); the draw keeps PC.
+        if (!lib && (err || !e->variant)) fprintf(stderr, "boot: render: MSL compile failed: %s\n", err.localizedDescription.UTF8String);
         else { e->fn = [lib newFunctionWithName:@"sm_main"]; e->ok = e->fn != nil; }
         if (diag_on && getenv("BOOT_DIAG_MSL")) {        // <diag>/msl/<key>.metal: the translated source of every variant
             char path[1024];

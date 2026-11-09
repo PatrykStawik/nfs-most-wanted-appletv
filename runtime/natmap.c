@@ -5,7 +5,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
-#include <net/route.h>
+#include <TargetConditionals.h>
+#if !TARGET_OS_TV
+#include <net/route.h>   /* not in the tvOS SDK: no gateway lookup there (NAT-PMP / PCP off, UPnP discovery stays) */
+#endif
 #include <netdb.h>
 #include <ctype.h>
 #include <net/if.h>
@@ -32,6 +35,9 @@ static int ready(int fd, short events, uint64_t end, const atomic_int *stop) {
     }
     return -1;
 }
+#if TARGET_OS_TV
+static uint32_t gateway(void) { return 0; }
+#else
 static uint32_t gateway(void) {
     int mib[] = {CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_FLAGS, RTF_GATEWAY}; size_t n = 0;
     if (sysctl(mib, 6, NULL, &n, NULL, 0) || !n || n > 1024 * 1024) return 0;
@@ -60,6 +66,7 @@ static uint32_t gateway(void) {
     }
     free(buf); return result;
 }
+#endif
 static int udp(uint32_t ip, uint16_t port, uint32_t *local) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0); if (fd < 0) return -1;
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(ip), .sin_port = htons(port)};

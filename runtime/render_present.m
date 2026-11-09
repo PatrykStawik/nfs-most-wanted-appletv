@@ -3,7 +3,13 @@
 #include "sign_diag.h"
 #include "brightness.h"
 #include "hdr_output.h"
+#include <TargetConditionals.h>
+#if TARGET_OS_TV
+#import <UIKit/UIKit.h>
+#include "tv_host.h"
+#else
 #import <Cocoa/Cocoa.h>
+#endif
 #include "settings.h"
 #include "framecap.h"
 #include "cliprec.h"
@@ -62,6 +68,14 @@ void render_presentation_stats(RenderPresentation *out) {
     double now = host_ticks() / 1e9;
     if (now >= next_display) {
         next_display = now + 1;
+#if TARGET_OS_TV
+        int hz = 60;                     // the TV's mode (Match Frame Rate aside): fixed, no variable refresh
+        tv_host_screen(NULL, NULL, NULL, &hz);
+        refresh_ms = 1000.0 / (hz > 0 ? hz : 60);
+        min_ms = max_ms = granularity_ms = 0;
+        vrr = 0;
+        native_fullscreen = 1;
+#else
         NSWindow *window = [layer.delegate isKindOfClass:NSView.class] ? ((NSView *)layer.delegate).window : nil;
         NSScreen *s = window.screen ?: NSScreen.mainScreen;
         double hz = s.maximumFramesPerSecond;
@@ -75,6 +89,7 @@ void render_presentation_stats(RenderPresentation *out) {
         }
         vrr = min_ms > 0 && max_ms > min_ms + 0.01 && granularity_ms == 0;
         native_fullscreen = !!(window.styleMask & NSWindowStyleMaskFullScreen);
+#endif
     }
     static const int limits[] = {0, 120, 60, 40};
     int choice = settings_get("graphics.frame_rate_limit");
@@ -88,7 +103,11 @@ void render_presentation_stats(RenderPresentation *out) {
     presentation.vrr_requested = settings_get("graphics.variable_refresh") == 1;
     presentation.adaptive_scheduling = presentation.vrr_requested && vrr && native_fullscreen &&
         (!limit || 1000.0 / limit <= max_ms);
+#if TARGET_OS_TV
+    presentation.display_sync = 1;
+#else
     presentation.display_sync = layer ? layer.displaySyncEnabled : 1;
+#endif
     presentation.duration_ms = framecap_duration(1000.0 / refresh_ms, limit) * 1000;
     if (presentation.adaptive_scheduling) {
         double target = limit ? 1000.0 / limit : gpu_average * 1000;
@@ -264,13 +283,23 @@ const char *render_hdr_output_status(void) {
     }
     return !hdr_output_requested ? "Off" : hdr_output_on && hdr_frame_headroom>1 ? "EDR active" : "SDR fallback";
 }
+#if TARGET_OS_TV
+// The Apple TV's output is SDR here: no EDR headroom is asked for (render_hdr_output_init stays off).
+typedef struct { double maximumExtendedDynamicRangeColorComponentValue, maximumPotentialExtendedDynamicRangeColorComponentValue,
+                 maximumReferenceExtendedDynamicRangeColorComponentValue; } TvScreenEDR;
+static TvScreenEDR hdr_tv_screen = {1, 1, 1};
+#define hdr_output_screen() (&hdr_tv_screen)
+#define hdr_screen_value(s, f) ((s)->f)
+#else
 static NSScreen *hdr_output_screen(void) {
     NSWindow *w = [layer.delegate isKindOfClass:NSView.class] ? ((NSView *)layer.delegate).window : nil;
     return w.screen ?: NSScreen.mainScreen;
 }
+#define hdr_screen_value(s, f) ((s).f)
+#endif
 float render_hdr_display_potential(void) {
     __block float potential=1;
-    void (^sample)(void)=^{ potential=(float)hdr_output_screen().maximumPotentialExtendedDynamicRangeColorComponentValue; };
+    void (^sample)(void)=^{ potential=(float)hdr_screen_value(hdr_output_screen(),maximumPotentialExtendedDynamicRangeColorComponentValue); };
     if(NSThread.isMainThread)sample();else dispatch_sync(dispatch_get_main_queue(),sample);
     return isfinite(potential) ? potential : 1;
 }
@@ -285,7 +314,7 @@ static float hdr_output_ceiling(float h) {
 static void hdr_output_frame_boundary(void) {
     if(!hdr_output_on)return;
     __block float h=1;
-    void (^sample)(void)=^{ h=(float)hdr_output_screen().maximumExtendedDynamicRangeColorComponentValue; };
+    void (^sample)(void)=^{ h=(float)hdr_screen_value(hdr_output_screen(),maximumExtendedDynamicRangeColorComponentValue); };
     if(NSThread.isMainThread)sample();else dispatch_sync(dispatch_get_main_queue(),sample);
     // Poll the actual window.screen every frame: moves, HDR mode changes and
     // wake need no asynchronous notification that could mutate a world frame.
@@ -299,10 +328,14 @@ static void hdr_output_frame_boundary(void) {
 float render_hdr_headroom(void) { return hdr_output_on ? hdr_frame_headroom : 1; }
 static void hdr_output_diag(const char *stage, MTLPixelFormat actual) {
     if (!diag_on || !hdr_output_requested) return;
+#if TARGET_OS_TV
+    TvScreenEDR *s = hdr_output_screen();
+#else
     NSScreen *s = hdr_output_screen();
+#endif
     diag_event("hdr_output: %s requested=edr active=%d headroom=%.6f potential=%.6f reference=%.6f layer_format=%lu drawable_format=%lu nil_drawables=%llu errors=%llu HDR_transport=unknown",
-               stage, hdr_output_on, s.maximumExtendedDynamicRangeColorComponentValue,
-               s.maximumPotentialExtendedDynamicRangeColorComponentValue, s.maximumReferenceExtendedDynamicRangeColorComponentValue,
+               stage, hdr_output_on, hdr_screen_value(s, maximumExtendedDynamicRangeColorComponentValue),
+               hdr_screen_value(s, maximumPotentialExtendedDynamicRangeColorComponentValue), hdr_screen_value(s, maximumReferenceExtendedDynamicRangeColorComponentValue),
                (unsigned long)layer.pixelFormat, (unsigned long)actual,
                (unsigned long long)__atomic_load_n(&hdr_nil_drawables, __ATOMIC_RELAXED),
                (unsigned long long)__atomic_load_n(&hdr_errors, __ATOMIC_RELAXED));
@@ -397,9 +430,13 @@ void render_hdr_output_init(void) {
     if (initialized) return;
     initialized = 1;
     hdr_output_requested = nfs_hdr_output_requested();
+#if TARGET_OS_TV
+    hdr_output_requested = 0;                      // SDR on the Apple TV
+#endif
     if (!hdr_output_requested || !layer) return;   // SDR: no layer/colour/PSO changes
     const char *pads=getenv("NFS_PADS");
     if(pads && !strcmp(pads,"2"))return;         // shared split atlas: retain the whole SDR frame
+#if !TARGET_OS_TV                       // never reached there (SDR), and the EDR layer properties don't exist
     void (^configure)(void) = ^{
         hdr_output_diag("before-enable", MTLPixelFormatInvalid);
         layer.wantsExtendedDynamicRangeContent = YES;
@@ -427,6 +464,7 @@ void render_hdr_output_init(void) {
         if (NSThread.isMainThread) restore();
         else dispatch_sync(dispatch_get_main_queue(), restore);
     }
+#endif
     hdr_output_frame_boundary();
 }
 id<MTLTexture> hdr_capture_source(id<MTLCommandBuffer> cb, id<MTLTexture> src) {
@@ -556,6 +594,15 @@ static void present_show(PresentTiming timing) {
 
 void render_present(void) {
     if (!mtl) return;
+#if TARGET_OS_TV
+    // tvOS refuses GPU work from an app in the background (Home, another app): the game thread waits here without the
+    // guest lock until the app is in front again (tvOS usually suspends the whole process meanwhile).
+    if (tv_host_background()) {
+        fprintf(stderr, "boot: in the background: frames stop until the app is back\n");
+        gil_release(); tv_host_wait_foreground(); gil_acquire();
+        fprintf(stderr, "boot: in front again: frames resume\n");
+    }
+#endif
     // Also bound submitted frames when a background/occluded window has no drawable.
     // Keep the scheduled slot through ordinary wake/GIL delays; a full-period
     // overrun (including a pause) rebases so a real stall cannot cause a burst.

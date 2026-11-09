@@ -2,8 +2,20 @@
 #include "media.h"
 #include "movie_api.h"
 
+#include <TargetConditionals.h>
 #include <AudioToolbox/AudioToolbox.h>
+#if TARGET_OS_TV
+// Apple TV: no HAL (devices, hog mode, physical formats). The output is RemoteIO in the app's playback session; the route
+// (TV, receiver, AirPods) comes from AVAudioSession through the host (tvos/host/tv_app.m). Multichannel PCM only: tvOS
+// encodes Dolby Digital itself when the TV or receiver asks for it (Settings, Video and Audio, Audio Format).
+#include "tv_host.h"
+typedef UInt32 AudioObjectID;
+typedef AudioObjectID AudioDeviceID;
+typedef AudioObjectID AudioStreamID;
+typedef void *AudioDeviceIOProcID;
+#else
 #include <CoreAudio/CoreAudio.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -616,6 +628,12 @@ struct FakeRx {
 
 std::string device_name(uint32_t dev) {
     if (fake_device()) return dev == kFakeTv ? "fake HDMI TV" : dev == kFakeSpeakers ? "fake speakers" : "?";
+#if TARGET_OS_TV
+    (void)dev;
+    char buf[256];
+    tv_audio_route_name(buf, sizeof buf);
+    return buf;
+#else
     std::string name = "?";
     CFStringRef cf = nullptr;
     UInt32 n = sizeof cf;
@@ -626,6 +644,7 @@ std::string device_name(uint32_t dev) {
         CFRelease(cf);
     }
     return name;
+#endif
 }
 
 // ------------------------------------------------------------------ physical formats
@@ -636,6 +655,10 @@ static std::string format_text(const AudioStreamBasicDescription &f) {
              (unsigned)f.mBitsPerChannel);
     return buf;
 }
+#if TARGET_OS_TV
+static void repair_encoded_streams(AudioObjectID) {}
+static AudioStreamID find_encoded_stream(AudioObjectID, OutputMode, AudioStreamBasicDescription * = nullptr, UInt32 * = nullptr) { return 0; }
+#else
 static bool read_physical_format(AudioStreamID s, AudioStreamBasicDescription *f) {
     AudioObjectPropertyAddress pf = {kAudioStreamPropertyPhysicalFormat, kAudioObjectPropertyScopeGlobal,
                                      kAudioObjectPropertyElementMain};
@@ -732,6 +755,7 @@ static AudioStreamID find_encoded_stream(AudioObjectID dev, OutputMode mode, Aud
     }
     return 0;
 }
+#endif
 
 bool default_device_takes_eac3() { if (fake_device()) return fake_default() == kFakeTv; return find_encoded_stream(default_output_device(), OutputMode::DolbyDigitalPlus) != 0; }
 bool default_device_takes_mat() { if (fake_device()) return fake_default() == kFakeTv; return find_encoded_stream(default_output_device(), OutputMode::TrueHd) != 0; }
@@ -743,6 +767,14 @@ OutputMode preferred_output_mode(std::string *why, bool truehd) {
                            : "\"fake speakers\", 2 speakers";
         return tv ? (truehd ? OutputMode::TrueHd : OutputMode::DolbyDigital) : OutputMode::Stereo;
     }
+#if TARGET_OS_TV
+    (void)truehd;
+    char name[256];
+    tv_audio_route_name(name, sizeof name);
+    int channels = tv_audio_route_channels();
+    if (why) *why = "\"" + std::string(name) + "\", " + std::to_string(channels) + " channels";
+    return channels >= 6 ? OutputMode::Pcm51 : OutputMode::Stereo;
+#else
     AudioObjectID dev = kAudioObjectUnknown;
     UInt32 n = sizeof dev;
     AudioObjectPropertyAddress a = {kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
@@ -804,13 +836,16 @@ OutputMode preferred_output_mode(std::string *why, bool truehd) {
     OutputMode m = surround >= 2 ? OutputMode::Pcm51 : OutputMode::Stereo;
     if (why) *why = "\"" + name + "\", " + std::to_string(labels.size()) + " speakers" + (surround >= 2 ? " with surrounds" : "");
     return m;
+#endif
 }
 
 // ------------------------------------------------------------------ device changes
+#if !TARGET_OS_TV
 static OSStatus devices_changed(AudioObjectID, UInt32, const AudioObjectPropertyAddress *, void *) {
     g_devices_gen.fetch_add(1, std::memory_order_relaxed);
     return noErr;
 }
+#endif
 static std::atomic<int> g_fail_opens{0};
 void fail_next_opens(int n) { g_fail_opens = n; }
 // Tests: passthrough is refused as with a TV that is asleep, and no PCM AudioUnit is ever created (counted instead), so a
@@ -822,18 +857,28 @@ int test_unit_attempts() { return g_unit_attempts; }
 
 bool device_alive(uint32_t dev) {
     if (fake_device()) return dev == kFakeTv || dev == kFakeSpeakers;
+#if TARGET_OS_TV
+    return dev != 0;
+#else
     UInt32 alive = 0, n = sizeof alive;
     AudioObjectPropertyAddress a = {kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal,
                                     kAudioObjectPropertyElementMain};
     return dev && AudioObjectGetPropertyData(dev, &a, 0, nullptr, &n, &alive) == noErr && alive;
+#endif
 }
 uint32_t default_output_device() {
     if (fake_device()) return fake_default();
+#if TARGET_OS_TV
+    // One id per route: a route change (TV speakers -> receiver) looks like a new default device, so the output reopens
+    // in the mode the new route takes.
+    return 1 + (uint32_t)(tv_audio_route_generation() & 0x7FFFFFFF);
+#else
     AudioObjectID dev = 0;
     UInt32 n = sizeof dev;
     AudioObjectPropertyAddress a = {kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
                                     kAudioObjectPropertyElementMain};
     return AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, nullptr, &n, &dev) == noErr ? dev : 0;
+#endif
 }
 uint64_t output_devices_generation() {
     if (fake_device()) {   // the fake default changes on its own clock: count its changes here
@@ -842,6 +887,9 @@ uint64_t output_devices_generation() {
         if (last.exchange(now) != now) g_devices_gen.fetch_add(1, std::memory_order_relaxed);
         return g_devices_gen.load(std::memory_order_relaxed);
     }
+#if TARGET_OS_TV
+    return tv_audio_route_generation();
+#else
     static std::once_flag once;
     std::call_once(once, [] {
         AudioObjectPropertyAddress a = {kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
@@ -851,6 +899,7 @@ uint64_t output_devices_generation() {
         AudioObjectAddPropertyListener(kAudioObjectSystemObject, &a, devices_changed, nullptr);
     });
     return g_devices_gen.load(std::memory_order_relaxed);
+#endif
 }
 
 // ------------------------------------------------------------------ AudioOutput (CoreAudio default output unit)
@@ -923,6 +972,22 @@ struct AudioOutput::Impl {
     std::mutex timing_lock;
     bool timing_active = false;
     bool timing_listeners[3] = {};
+#if TARGET_OS_TV
+    // The session's I/O buffer stands for the device period (no safety offset is published on tvOS).
+    void refresh_pcm_timing() {
+        UInt32 period = (UInt32)std::lround(tv_audio_io_seconds() * rate);
+        minimum_queue.store(pcm_queue_frames(period ? period : 512, 0, rate, rate), std::memory_order_relaxed);
+    }
+    void start_pcm_timing() {
+        std::lock_guard<std::mutex> g(timing_lock);
+        timing_active = true;
+        refresh_pcm_timing();
+    }
+    void stop_pcm_timing() {
+        { std::lock_guard<std::mutex> g(timing_lock); timing_active = false; }
+        minimum_queue.store(0, std::memory_order_relaxed);
+    }
+#else
     static AudioObjectPropertyAddress timing_address(int i) {
         return {i == 0 ? kAudioDevicePropertyBufferFrameSize :
                 i == 1 ? kAudioDevicePropertySafetyOffset : kAudioDevicePropertyNominalSampleRate,
@@ -966,6 +1031,7 @@ struct AudioOutput::Impl {
         }
         minimum_queue.store(0, std::memory_order_relaxed);
     }
+#endif
     mutable std::mutex lock;
     Ring<float> fq{1u << 18};       // Pcm51 / Stereo samples
     Ring<uint8_t> bq{1u << 18};     // DolbyDigital / DolbyDigitalPlus bytes (IEC 61937 as s16le stereo)
@@ -1067,6 +1133,31 @@ struct AudioOutput::Impl {
 // channel with the same label (kAudioOutputUnitProperty_ChannelMap: per device channel, the source channel or -1).
 // Rear surrounds stand in for missing side surrounds. Devices with fewer than 6 labelled channels keep the default
 // mapping (the unit folds 5.1 down from the declared input layout).
+#if TARGET_OS_TV
+// The route's channel labels (AVAudioSession): HDMI usually takes L R C LFE Ls Rs already; a receiver that numbers its
+// speakers another way gets the same label-for-label channel map as on the Mac.
+static void map_to_device_speakers(AudioComponentInstance unit) {
+    uint32_t labels[16];
+    int n = tv_audio_route_labels(labels, 16);
+    if (n < 6) return;
+    static const AudioChannelLabel ours[6] = {kAudioChannelLabel_Left, kAudioChannelLabel_Right, kAudioChannelLabel_Center,
+                                              kAudioChannelLabel_LFEScreen, kAudioChannelLabel_LeftSurround,
+                                              kAudioChannelLabel_RightSurround};
+    std::vector<SInt32> map((size_t)n, -1);
+    int found = 0;
+    for (int i = 0; i < n; ++i) {
+        AudioChannelLabel lab = labels[i];
+        if (lab == kAudioChannelLabel_RearSurroundLeft) lab = kAudioChannelLabel_LeftSurround;
+        if (lab == kAudioChannelLabel_RearSurroundRight) lab = kAudioChannelLabel_RightSurround;
+        for (int k = 0; k < 6; ++k)
+            if (lab == ours[k] && std::find(map.begin(), map.end(), k) == map.end()) { map[(size_t)i] = k; ++found; break; }
+    }
+    if (found != 6) return;
+    UInt32 bytes = (UInt32)(map.size() * sizeof(SInt32));
+    if (AudioUnitSetProperty(unit, kAudioOutputUnitProperty_ChannelMap, kAudioUnitScope_Output, 0, map.data(), bytes) != noErr)
+        AudioUnitSetProperty(unit, kAudioOutputUnitProperty_ChannelMap, kAudioUnitScope_Input, 0, map.data(), bytes);
+}
+#else
 static void map_to_device_speakers(AudioComponentInstance unit) {
     AudioDeviceID dev = 0;
     UInt32 sz = sizeof dev;
@@ -1095,6 +1186,7 @@ static void map_to_device_speakers(AudioComponentInstance unit) {
     if (AudioUnitSetProperty(unit, kAudioOutputUnitProperty_ChannelMap, kAudioUnitScope_Output, 0, map.data(), bytes) != noErr)
         AudioUnitSetProperty(unit, kAudioOutputUnitProperty_ChannelMap, kAudioUnitScope_Input, 0, map.data(), bytes);
 }
+#endif
 
 // Dolby Digital (Plus) over HDMI / optical has to reach the device bit-exact, which the default output unit (a mixer with
 // volume and format conversion) doesn't do. If the default device offers an encoded AC-3 format (kAudioFormat60958AC3,
@@ -1103,6 +1195,10 @@ static void map_to_device_speakers(AudioComponentInstance unit) {
 // channels are then labelled inside the AC-3 stream, so nothing between the Mac and the decoder can reorder them.
 // close() restores the format, mixing and hog mode. Dolby Digital Plus works the same way with the E-AC-3 format
 // ('cec3', 192 kHz link rate; find_encoded_stream).
+#if TARGET_OS_TV
+bool AudioOutput::Impl::open_passthrough() { return false; }
+void AudioOutput::Impl::close_passthrough() { passthrough = false; }
+#else
 bool AudioOutput::Impl::open_passthrough() {
     AudioObjectPropertyAddress a = {kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
                                     kAudioObjectPropertyElementMain};
@@ -1170,6 +1266,7 @@ void AudioOutput::Impl::close_passthrough() {
     passthrough = false;
     stream = 0;
 }
+#endif
 
 bool AudioOutput::Impl::open_fake() {
     uint32_t on = default_output_device();
@@ -1233,8 +1330,17 @@ bool AudioOutput::open(OutputMode mode, int rate) {
     if (d->bitstream()) return false;
     if (g_refuse_passthrough) { ++g_unit_attempts; return false; }
     repair_encoded_streams(default_output_device());
+#if TARGET_OS_TV
+    int route = tv_audio_activate(d->channels);   // the session's output channels for this mode (6 over HDMI 5.1)
+    if (mode == OutputMode::Pcm51 && route < 6) {  // a stereo route (TV speakers, AirPods): the ITU fold-down, not 2 of 6 channels
+        d->mode = mode = OutputMode::Stereo;
+        d->channels = 2;
+    }
+    AudioComponentDescription desc = {kAudioUnitType_Output, kAudioUnitSubType_RemoteIO, kAudioUnitManufacturer_Apple, 0, 0};
+#else
     AudioComponentDescription desc = {kAudioUnitType_Output, kAudioUnitSubType_DefaultOutput,
                                       kAudioUnitManufacturer_Apple, 0, 0};
+#endif
     AudioComponent comp = AudioComponentFindNext(nullptr, &desc);
     if (!comp || AudioComponentInstanceNew(comp, &d->unit) != noErr) return false;
     AudioStreamBasicDescription f = {};
@@ -1258,8 +1364,12 @@ bool AudioOutput::open(OutputMode mode, int rate) {
     if (mode == OutputMode::Pcm51) map_to_device_speakers(d->unit);
     if (AudioUnitInitialize(d->unit) != noErr) return false;
     d->last_callback = now_ns();                 // stalled() counts from here (passthrough: from its IOProc's start)
+#if TARGET_OS_TV
+    d->opened_on = default_output_device();
+#else
     UInt32 sz = sizeof d->opened_on;
     AudioUnitGetProperty(d->unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &d->opened_on, &sz);
+#endif
     d->start_pcm_timing();
     if (AudioOutputUnitStart(d->unit) == noErr) return true;
     d->stop_pcm_timing();
@@ -1335,7 +1445,9 @@ void AudioOutput::write(const float *pcm51, size_t frames) {
 uint32_t AudioOutput::device() const { return d->opened_on; }
 void AudioOutput::stop_for_test() {
     if (d->fake) { d->fake_run = false; if (d->fake_thread.joinable()) d->fake_thread.join(); return; }
+#if !TARGET_OS_TV
     if (d->passthrough && d->proc) AudioDeviceStop(d->dev, d->proc);
+#endif
     if (d->unit) AudioOutputUnitStop(d->unit);
 }
 bool AudioOutput::exclusive() const { return d->passthrough; }
