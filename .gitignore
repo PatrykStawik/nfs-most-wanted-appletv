@@ -16,3 +16,10 @@ runtime/NFSMW.app/
 runtime/gen/
 runtime/boot.pconly*
 /.runs/
+# Apple TV build (tvos/): output, the generated Xcode project, this Mac's settings
+out/
+.venv/
+tvos/NFSMW.xcodeproj/
+tvos/local.env
+# the player's own game folder (tvos/tv.sh's default GAME): never committed
+NFS Most Wanted/

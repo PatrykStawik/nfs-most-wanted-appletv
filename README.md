@@ -29,6 +29,12 @@ Step by step, including the one-time "Open Anyway" for an app that is not notari
 (same name, same Dock icon) and keeps it as "NFS Most Wanted Native 3.x.app". See the
 [changelog](CHANGELOG.md).
 
+## Apple TV
+
+The same runtime also builds for the **Apple TV 4K**: on your Mac you build an app that contains your own game folder and
+install it on your own Apple TV with Xcode's tools. Play it with a game controller. Steps, limits and how it is put together:
+**[tvos/README.md](tvos/README.md)**.
+
 ## What you need
 
 - An Apple Silicon Mac (M1 or later) with macOS 14.5 or later (provisional).
