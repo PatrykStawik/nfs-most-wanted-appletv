@@ -1,7 +1,10 @@
 // Per-second system evidence. Registry, IOPS and IOReport work stays on a utility queue.
 #import <Foundation/Foundation.h>
+#include <TargetConditionals.h>
+#if !TARGET_OS_TV
 #include <IOKit/ps/IOPowerSources.h>
 #include <IOKit/ps/IOPSKeys.h>
+#endif
 #include <dispatch/dispatch.h>
 #include <math.h>
 #include <stdlib.h>
@@ -60,6 +63,9 @@ static void power_sample(SlowlogSample *s) {
     NSInteger thermal = p.thermalState;
     s->thermal = thermal >= 0 && thermal <= 3 ? (int)thermal : -1;
     s->low_power = p.lowPowerModeEnabled ? 1 : 0;
+#if TARGET_OS_TV
+    strcpy(s->power, "AC");   // the Apple TV has no battery and no IOKit power sources
+#else
     CFTypeRef info = IOPSCopyPowerSourcesInfo();
     if (!info) return;
     CFStringRef type = IOPSGetProvidingPowerSourceType(info);
@@ -84,6 +90,7 @@ static void power_sample(SlowlogSample *s) {
     if (capacity > 0) s->battery_pct = 100 * current / capacity;
     if (sources) CFRelease(sources);
     CFRelease(info);
+#endif
 }
 
 // Triple-buffer ownership: producer, consumer and middle each own one slot.

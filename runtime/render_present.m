@@ -35,10 +35,12 @@ static PresentTiming present_timing_begin(uint64_t frame) {
     if (!diag_on) return timing;
     timing.present = host_ticks() / 1e9;
     present_timing_frame = frame;
+    double update = 0;
+#if !TARGET_OS_TV   // tvOS's UIScreen has no display update timestamp
     NSWindow *window = [layer.delegate isKindOfClass:NSView.class] ? ((NSView *)layer.delegate).window : nil;
     NSScreen *screen = window.screen ?: NSScreen.mainScreen;
-    double update = 0;
     if (@available(macOS 12.0, *)) update = screen.lastDisplayUpdateTimestamp;
+#endif
     diag_event("present-frame frame=%llu Present=%.9f screen_update=%.9f",
                (unsigned long long)frame, timing.present, update);
     return timing;

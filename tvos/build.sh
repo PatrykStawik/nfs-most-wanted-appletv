@@ -72,21 +72,14 @@ else mv "$OUT/inc/app_prefs.inc.new" "$OUT/inc/app_prefs.inc"; fi
 # Sources. The runtime list is runtime/build.sh's public list without the Mac-only parts, which tvos/host replaces:
 #   app.m, pub_update_launch.m        -> tv_app.m (UIKit, the game thread, folders, preferences, the audio session)
 #   rumble.m (IOKit HID)              -> tv_rumble.m (GameController haptics)
-#   report.m, report_github.m, report_submit.m, pub_update.m, pub_discord.c, gpuclients.m, cliprec.mm
-#                                     -> tv_stubs.c (problem reports, updates, Discord, GPU clients, clip recording: off)
-RUNTIME="boot.c cash_cheat.c underglow_ui.c underglow.c underglow_store.c underglow_photometry.c car85.c contact_mass.c
-private_cars_public.c car_catalog.c carsave_public.c server_loader.c lanserver_selftest.c heap.c d3dx.c d3dx_effect.c
-threads.c user32.m d3d9.m render.m sign_diag.m pipeline_cache.m render_target.m render_query.m render_present.m
-render_post.m post_cuts.c render_thread.m gpupass.m dsound.c audio_limiter.c posaudio.c dinput.c ws2_32.c interp.c
-diag.c save_timing.c breaker_diag.c diag_car.c imports.c movies.c x360.m shadow_near.m x360_post.m x360_textures.m
-padprompts.c maxperf_career.c padbind.c controlpages.c controltype.c pedals.c steerresp.c chasecam.c vinyls.m
-widescreen.c padguest.c qrsplit.c splitworld.c splitcapture.c mirror.c lampglow.c aa_setting.c alpha_to_coverage.c
-lampbatch.m detail.c streaming.c bootflow.c pacing.c padfx.m feedback.c overlay.m probe.m materials.m
-particles_physical.c realworld_materials.c traffic_detail.c traffic_pilot.c roadfilm.m lighting.c settings.c text_fit.c
-roam_auth.c roam_moderation.c settings_port.c portmenu.m guide.m onscreen_keyboard.c gameplay_opts.c fe_console.c
-attrib_x360.c trees.c auxlights.c x360audio.c extratrax_public.c pub_settings.c x360abk.c x360copspeech.c
-x360nisaudio.c x360_shadow_fit.cpp roam_game.c roam_hud.c roam_core.c roam_relay.c roam_server.c roam_online.c
-roam_code.c natmap.c natpmp.c pcp.c upnp.c render_metalfx_spatial.m render_upscale_route.m"
+#   report.m, report_github.m, report_submit.m, pub_update.m, pub_discord.c, gpuclients.m, cliprec.mm, stream_key.m
+#                                     -> tv_stubs.m (problem reports, updates, Discord, GPU clients, clip recording and
+#                                        the stream key's AppKit entry panel: off)
+MAC_ONLY="app.m pub_update_launch.m rumble.m report.m report_github.m report_submit.m pub_update.m pub_discord.c gpuclients.m cliprec.mm stream_key.m"
+# runtime/build.sh's NFS_PUBLIC=1 sources (its public branch, then the clang command's file list), read at build time
+RUNTIME=$( (sed -n '/NFS_PUBLIC:-0}" = 1/,/^else/p' runtime/build.sh; sed -n '/^clang \\$/,/speed\.a/p' runtime/build.sh) |
+    sed -nE 's/^ *([A-Za-z0-9_]+\.(c|m|mm|cpp)) *\\?$/\1/p' | grep -vxF "$(echo $MAC_ONLY | tr ' ' '\n')" | tr '\n' ' ')
+[ -n "$RUNTIME" ] || { echo "tvos/build.sh: no sources found in runtime/build.sh" >&2; exit 1; }
 HOST=$(cd tvos/host && ls *.c *.m 2>/dev/null | tr '\n' ' ')
 CXX_SRC="host/shaders/sm_parse.cpp host/shaders/sm_msl.cpp host/audio/dsound_host.cpp media/media.cpp"
 jobs_list() {

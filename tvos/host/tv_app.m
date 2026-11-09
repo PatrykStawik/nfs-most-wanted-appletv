@@ -77,6 +77,7 @@ int app_fullscreen_resolve(const char *mode, int builtin) {
 }
 int app_fullscreen_is_auto(void) { return 0; }
 int app_native_fullscreen(void) { return 0; }   // the game always fills the TV
+void app_fullscreen_mode_reset(void) {}
 int app_screen_is_builtin(void) { return 0; }
 void app_cocoa_init(void) {}
 void app_restart_game_exited(int successful) { (void)successful; }
@@ -138,6 +139,9 @@ static void tv_hide_rows(void) {
         "graphics.variable_refresh", "graphics.hdr_output", "audio.output",
         "diag.h_report", "diag.report_category", "diag.report_note", "diag.report_save", "diag.report_open", "diag.logs_open",
         "gameplay.lan",
+        "display.replay_arm", "display.replay_save", "controls.replay_key_enabled", "controls.replay_key", "controls.replay_pad",
+        "display.stream_heading", "display.stream_key", "display.stream_forget", "display.stream_go", "display.stream_stop",
+        "display.stream_status",
     };
     for (size_t i = 0; i < sizeof ids / sizeof *ids; ++i) { Setting *s = settings_find(ids[i]); if (s) s->hidden = 1; }
     Setting *r = settings_find("diag.restart_game");

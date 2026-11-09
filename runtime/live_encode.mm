@@ -5,6 +5,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#if TARGET_OS_TV
+enum { paramErr = -50 };   // MacErrors.h (CoreServices) is macOS only
+#endif
 
 namespace live {
 bool enabled() {

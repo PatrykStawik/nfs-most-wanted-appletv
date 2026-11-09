@@ -765,6 +765,9 @@ int user32_fullscreen(void) { Win *w = game_window(); return w && ns_fullscreen(
 // F10 > Full screen (live_picture.c): NFS_FULLSCREEN_MODE has changed. No device Reset: the back buffer stays the game's size.
 void app_fullscreen_mode_reset(void);   // app.m: Auto decides from the screen again
 static void ns_reconcile_mode(Win *w) {
+#if TARGET_OS_TV
+    (void)w;   // the game always fills the TV: no Spaces, no window modes
+#else
     if (w->native_transition) { w->mode_pending = 1; return; }
     w->mode_pending = 0;
     if ((w->ns.styleMask & NSWindowStyleMaskFullScreen) && !app_native_fullscreen()) {   // out of the Space first, then borderless
@@ -774,6 +777,7 @@ static void ns_reconcile_mode(Win *w) {
     }
     ns_apply_mode(w);
     if (!w->native_transition) ns_mode_changed(w);
+#endif
 }
 void user32_fullscreen_mode_changed(void) {
     Win *w = game_window();

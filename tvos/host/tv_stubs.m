@@ -8,6 +8,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 #include <stdint.h>
 
 #include "host.h"
@@ -61,5 +62,33 @@ void cliprec_present(id<MTLCommandBuffer> __unsafe_unretained cb, id<MTLTexture>
     (void)cb; (void)src; (void)drawable; (void)headroom;
 }
 
+int cliprec_live_start(void) { return 0; }
+void replay_arm_action(int unused) { (void)unused; }
+void replay_save_action(int unused) { (void)unused; }
+void replay_status(char *buf, int size) { if (size > 0) buf[0] = 0; }
+void replay_save_status(char *buf, int size) { if (size > 0) buf[0] = 0; }
+
+// ---- gpuclients.m: other processes' GPU use comes from the IOKit registry, which tvOS doesn't open to apps ----
+#include <math.h>
+#include "gpuclients.h"
+GPUClients *gpuclients_create(void) { return NULL; }
+void gpuclients_destroy(GPUClients *s) { (void)s; }
+void gpuclients_sample(GPUClients *s, GPUClientsSample *out) {
+    (void)s;
+    memset(out, 0, sizeof *out);
+    out->dev_util = out->self_ms = out->other_ms = NAN;
+    strcpy(out->top, "-"); strcpy(out->mhz, "-"); strcpy(out->states, "-"); strcpy(out->clock_status, "unavailable on tvOS");
+}
+void gpuclients_publish(const GPUClientsSample *s) { (void)s; }
+
 // ---- pub_discord.c ----
 void pub_discord_tick(uint32_t flow) { (void)flow; }
+
+// ---- stream_key.m: the stream key is typed into an AppKit panel; no live streaming from the Apple TV ----
+void stream_key_edit(int unused) { (void)unused; }
+void stream_key_forget(int unused) { (void)unused; }
+void stream_key_go(int unused) { (void)unused; }
+void stream_key_stop(int unused) { (void)unused; }
+void stream_key_status(char *buf, int size) { if (size > 0) snprintf(buf, size, "Not on Apple TV"); }
+void stream_key_close(void) {}
+int stream_key_editing(void) { return 0; }
