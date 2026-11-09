@@ -31,9 +31,18 @@ Step by step, including the one-time "Open Anyway" for an app that is not notari
 
 ## Apple TV
 
-The same runtime also builds for the **Apple TV 4K**: on your Mac you build an app that contains your own game folder and
-install it on your own Apple TV with Xcode's tools. Play it with a game controller. Steps, limits and how it is put together:
-**[tvos/README.md](tvos/README.md)**.
+The same runtime also runs on the **Apple TV 4K** (tvOS 17 or later, any generation; tested on the 3rd). This is **not**
+the Setup app above: the Mac only builds the app, and you play on the Apple TV with a game controller.
+
+1. On the Mac: install **Xcode**, `gem install xcodeproj`, and sign in to Xcode with your Apple developer account.
+2. Pair the Apple TV in Xcode (Window, Devices and Simulators, **+**), awake and on the same network as the Mac.
+3. Put your own PC game folder (v1.3) in the checkout as `NFS Most Wanted/`, and write `tvos/local.env` with your team
+   ID and a bundle ID of your own.
+4. Run `tvos/tv.sh run`. It translates the game, builds the app, installs it on the Apple TV and starts it.
+5. Afterwards open **NFS Most Wanted** from the Apple TV's Home screen. Or install it from the TestFlight app on the
+   Apple TV (`tvos/tv.sh upload`, internal testers only).
+
+Settings, saves in iCloud, limits and how it is put together: **[tvos/README.md](tvos/README.md)**.
 
 ## What you need
 

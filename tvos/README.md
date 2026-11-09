@@ -7,6 +7,18 @@ game folder. You install it on **your own** Apple TV from Xcode's tools. There i
 > You need your own copy of the game (PC, v1.3). The app you build contains your game files: it is for your own Apple
 > TV. Never share it, upload it to the App Store or send it to external TestFlight testers.
 
+## Quick start
+
+Everything runs from the Mac; nothing is installed from the Mac's Setup app.
+
+1. Pair the Apple TV with Xcode (see below), awake and on the same network.
+2. Create `tvos/local.env` with `TEAM` and `BUNDLE_ID`, and put your PC game folder in the checkout as
+   `NFS Most Wanted/` (or set `GAME`).
+3. `tvos/tv.sh run` (the first run takes about five minutes to translate the game, then a 3 GB transfer).
+4. On the Apple TV, pair a game controller, then open **NFS Most Wanted** from the Home screen. The first launch shows
+   a black screen for about 15 seconds.
+5. Later: `tvos/tv.sh install` then `tvos/tv.sh launch` after a rebuild, or `tvos/tv.sh upload` for TestFlight.
+
 ## What you need
 
 - A Mac with **Xcode** (with the tvOS SDK) and Python 3. The Xcode project is generated with the `xcodeproj` Ruby gem:
